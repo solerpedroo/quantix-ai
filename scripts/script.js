@@ -1,12 +1,129 @@
 // ========== CONFIGURATION ==========
 const CONFIG = {
-    GROQ_API_KEY: 'sua-chave-aqui', // COLE SUA CHAVE REAL DO GROQ AQUI
+    GROQ_API_KEY: '', // COLE SUA CHAVE REAL DO GROQ AQUI
     GROQ_MODEL: 'llama-3.3-70b-versatile',
     GROQ_ENDPOINT: 'https://api.groq.com/openai/v1/chat/completions',
     COINGECKO_API: 'https://api.coingecko.com/api/v3',
     BRAPI_API: 'https://brapi.dev/api',
-    YAHOO_FINANCE_API: 'https://query1.finance.yahoo.com/v8/finance/chart'
+    YAHOO_FINANCE_API: 'https://query1.finance.yahoo.com/v8/finance/chart',
+    /** Opcional: https://brapi.dev — planos pagos ou limites quando a API pública falha */
+    BRAPI_TOKEN: '',
+    /**
+     * Yahoo costuma bloquear fetch direto do navegador (CORS). Com true,
+     * tentamos um proxy público só se o request direto falhar.
+     */
+    YAHOO_USE_CORS_PROXY: true
 };
+
+function formatIntlCurrency(value, currency) {
+    const n = Number(value);
+    try {
+        return new Intl.NumberFormat('pt-BR', {
+            style: 'currency',
+            currency,
+            maximumFractionDigits: 2,
+            minimumFractionDigits: 2
+        }).format(n);
+    } catch {
+        return `${n.toFixed(2)} ${currency}`;
+    }
+}
+
+function compactNumberPt(value) {
+    return new Intl.NumberFormat('pt-BR', {
+        notation: 'compact',
+        maximumFractionDigits: 2
+    }).format(Number(value));
+}
+
+/** Evita cotação de outro papel; se Yahoo omitir meta.symbol, confia na URL do request. */
+function yahooTickerMatchesRequest(requested, metaSymbol) {
+    const r = requested.trim().toUpperCase();
+    const m = (metaSymbol || '').trim().toUpperCase();
+    if (!m) return true;
+    if (r === m) return true;
+    const rBase = r.replace(/\.SA$/i, '');
+    const mBase = m.replace(/\.SA$/i, '');
+    return rBase === mBase;
+}
+
+function normalizeComparableB3(code) {
+    return String(code || '')
+        .trim()
+        .toUpperCase()
+        .replace(/\.SA$/i, '');
+}
+
+function buildBrapiQuoteUrl(cleanSymbol) {
+    const u = new URL(`${CONFIG.BRAPI_API}/quote/${encodeURIComponent(cleanSymbol)}`);
+    u.searchParams.set('range', '1d');
+    u.searchParams.set('interval', '1d');
+    u.searchParams.set('fundamental', 'false');
+    const token = String(CONFIG.BRAPI_TOKEN || '').trim();
+    if (token) u.searchParams.set('token', token);
+    return u.toString();
+}
+
+/** Preço atual na Brapi pode vir null fora do pregão — usa fallbacks válidos para B3. */
+function pickBrapiPrice(stock) {
+    const order = [
+        stock.regularMarketPrice,
+        stock.regularMarketDayClose,
+        stock.regularMarketPreviousClose,
+        stock.postMarketPrice,
+        stock.preMarketPrice
+    ];
+
+    for (const v of order) {
+        const n = Number(v);
+        if (Number.isFinite(n) && n > 0) return n;
+    }
+    return null;
+}
+
+function computeBrapiChangePercent(stock, priceUsed) {
+    const direct = Number(stock.regularMarketChangePercent);
+    if (Number.isFinite(direct)) return direct;
+    const prev = Number(stock.regularMarketPreviousClose);
+    return Number.isFinite(prev) &&
+        prev > 0 &&
+        Number.isFinite(priceUsed) &&
+        priceUsed > 0
+        ? ((priceUsed - prev) / prev) * 100
+        : 0;
+}
+
+/**
+ * Direto primeiro; sem CORS, tentamos proxy público para o mesmo JSON do Yahoo Chart.
+ */
+async function fetchChartJsonFlexible(url) {
+    try {
+        const res = await fetch(url);
+        if (res.ok) return await res.json();
+    } catch (_) {}
+
+    if (!CONFIG.YAHOO_USE_CORS_PROXY) {
+        return null;
+    }
+
+    const proxyBases = [
+        u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+        u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`
+    ];
+
+    for (const build of proxyBases) {
+        try {
+            const proxyUrl = build(url);
+            const res = await fetch(proxyUrl);
+            if (res.ok) {
+                const text = await res.text();
+                return JSON.parse(text);
+            }
+        } catch (_) {}
+    }
+
+    return null;
+}
 
 // ========== DATA ==========
 const ASSETS = {
@@ -43,6 +160,7 @@ const ASSETS = {
         { symbol: 'CRFB3.SA', name: 'Carrefour Brasil ON', type: 'B3', market: 'Brazil' },
         { symbol: 'BEEF3.SA', name: 'Minerva ON', type: 'B3', market: 'Brazil' },
         { symbol: 'JBSS3.SA', name: 'JBS ON', type: 'B3', market: 'Brazil' },
+        { symbol: 'KEPL3.SA', name: 'Kepler Weber ON', type: 'B3', market: 'Brazil' },
         { symbol: 'MRFG3.SA', name: 'Marfrig ON', type: 'B3', market: 'Brazil' },
         { symbol: 'BRFS3.SA', name: 'BRF ON', type: 'B3', market: 'Brazil' },
         { symbol: 'CCRO3.SA', name: 'CCR ON', type: 'B3', market: 'Brazil' },
@@ -105,6 +223,7 @@ const ASSETS = {
         { symbol: 'AAPL34.SA', name: 'Apple BDR', type: 'B3', market: 'Brazil' },
         { symbol: 'MSFT34.SA', name: 'Microsoft BDR', type: 'B3', market: 'Brazil' },
         { symbol: 'AMZO34.SA', name: 'Amazon BDR', type: 'B3', market: 'Brazil' },
+        { symbol: 'MELI34.SA', name: 'Mercado Libre BDR', type: 'B3', market: 'Brazil' },
         { symbol: 'TSLA34.SA', name: 'Tesla BDR', type: 'B3', market: 'Brazil' }
     ],
     us: [
@@ -473,74 +592,176 @@ function showAlert(message, type = 'info') {
 }
 
 // ========== API CALLS ==========
+async function fetchYahooFinanceChart(symbol) {
+    const url = `${CONFIG.YAHOO_FINANCE_API}/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
+
+    const data = await fetchChartJsonFlexible(url);
+
+    if (!data) {
+        return null;
+    }
+    if (data.chart?.error) {
+        console.warn(`Yahoo chart error for ${symbol}:`, data.chart.error);
+        return null;
+    }
+
+    if (!(data.chart && data.chart.result && data.chart.result.length > 0)) {
+        return null;
+    }
+
+    const result = data.chart.result[0];
+    const meta = result.meta;
+    const quote = result.indicators?.quote?.[0];
+    if (!quote) {
+        console.warn(`Yahoo: sem série de quotes para ${symbol}`);
+        return null;
+    }
+
+    if (!yahooTickerMatchesRequest(symbol, meta.symbol)) {
+        console.warn(`Yahoo ticker mismatch for ${symbol} (got ${meta.symbol})`);
+        return null;
+    }
+
+    const highs = (quote.high || []).filter(v => v != null && Number.isFinite(v));
+    const lows = (quote.low || []).filter(v => v != null && Number.isFinite(v));
+    const closes = (quote.close || []).filter(v => v != null && Number.isFinite(v));
+    const lastClose = closes.length ? closes[closes.length - 1] : null;
+
+    let currentPrice =
+        Number.isFinite(meta.regularMarketPrice) && meta.regularMarketPrice > 0
+            ? meta.regularMarketPrice
+            : null;
+    currentPrice ??= Number.isFinite(lastClose) && lastClose > 0 ? lastClose : null;
+    currentPrice ??= Number.isFinite(meta.previousClose) && meta.previousClose > 0 ? meta.previousClose : null;
+
+    let baseline =
+        Number.isFinite(meta.chartPreviousClose) && meta.chartPreviousClose > 0
+            ? meta.chartPreviousClose
+            : null;
+    baseline ??=
+        Number.isFinite(meta.previousClose) && meta.previousClose > 0 ? meta.previousClose : null;
+    if (!(Number.isFinite(baseline) && baseline > 0) && closes.length > 1) {
+        baseline = closes[closes.length - 2];
+    }
+
+    const changePct =
+        Number.isFinite(baseline) && baseline > 0 && Number.isFinite(currentPrice)
+            ? ((currentPrice - baseline) / baseline) * 100
+            : 0;
+
+    let high =
+        Number.isFinite(meta.regularMarketDayHigh) && meta.regularMarketDayHigh > 0
+            ? meta.regularMarketDayHigh
+            : highs.length > 0
+              ? Math.max(...highs)
+              : currentPrice;
+    let low =
+        Number.isFinite(meta.regularMarketDayLow) && meta.regularMarketDayLow > 0
+            ? meta.regularMarketDayLow
+            : lows.length > 0
+              ? Math.min(...lows)
+              : currentPrice;
+
+    const candleVolumes = (quote.volume || []).filter(v => v != null && Number.isFinite(v));
+    let volume =
+        Number.isFinite(meta.regularMarketVolume) && meta.regularMarketVolume > 0
+            ? meta.regularMarketVolume
+            : candleVolumes.length
+              ? candleVolumes[candleVolumes.length - 1]
+              : 0;
+    volume = Number(volume) || 0;
+
+    const currency = meta.currency || (symbol.includes('.SA') ? 'BRL' : 'USD');
+
+    return {
+        price: currentPrice,
+        change: changePct,
+        volume,
+        high: Number.isFinite(high) ? high : currentPrice,
+        low: Number.isFinite(low) ? low : currentPrice,
+        name: meta.longName || meta.symbol || symbol,
+        currency
+    };
+}
+
 async function fetchStockData(symbol) {
-    try {
-        // Para ações da B3, usa Brapi
-        if (symbol.includes('.SA')) {
-            const cleanSymbol = symbol.replace('.SA', '');
-            const response = await fetch(`https://brapi.dev/api/quote/${cleanSymbol}?range=1d&interval=1d&fundamental=false`);
-            
+    const tryBrapiB3 = async cleanSymbol => {
+        try {
+            const response = await fetch(buildBrapiQuoteUrl(cleanSymbol));
+
             if (!response.ok) {
-                throw new Error(`Brapi error: ${response.status}`);
+                return null;
             }
-            
-            const data = await response.json();
-            
-            if (data.results && data.results.length > 0) {
-                const stock = data.results[0];
-                return {
-                    price: stock.regularMarketPrice || 0,
-                    change: stock.regularMarketChangePercent || 0,
-                    volume: stock.regularMarketVolume || 0,
-                    high: stock.regularMarketDayHigh || stock.regularMarketPrice || 0,
-                    low: stock.regularMarketDayLow || stock.regularMarketPrice || 0,
-                    name: stock.longName || stock.shortName || symbol
-                };
+
+            let data;
+            try {
+                data = await response.json();
+            } catch (_) {
+                return null;
             }
-        } else {
-            // Para ações US, usa API alternativa gratuita
-            const response = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d`);
-            
-            if (!response.ok) {
-                throw new Error(`Yahoo Finance error: ${response.status}`);
+
+            if (!data.results || data.results.length === 0) {
+                return null;
             }
-            
-            const data = await response.json();
-            
-            if (data.chart && data.chart.result && data.chart.result.length > 0) {
-                const result = data.chart.result[0];
-                const meta = result.meta;
-                const quote = result.indicators.quote[0];
-                
-                const currentPrice = meta.regularMarketPrice || meta.previousClose;
-                const previousClose = meta.chartPreviousClose || meta.previousClose;
-                const change = previousClose ? ((currentPrice - previousClose) / previousClose) * 100 : 0;
-                
-                return {
-                    price: currentPrice,
-                    change: change,
-                    volume: meta.regularMarketVolume || quote.volume[quote.volume.length - 1] || 0,
-                    high: meta.regularMarketDayHigh || Math.max(...quote.high.filter(v => v !== null)) || currentPrice,
-                    low: meta.regularMarketDayLow || Math.min(...quote.low.filter(v => v !== null)) || currentPrice,
-                    name: meta.longName || meta.symbol
-                };
+
+            const stock = data.results[0];
+            const comparable = normalizeComparableB3(stock.symbol);
+            if (comparable !== cleanSymbol.toUpperCase()) {
+                console.warn(`Brapi símbolo diverge: pedido=${cleanSymbol} retorno=${stock.symbol}`);
+                return null;
             }
+
+            const priceNum = pickBrapiPrice(stock);
+            if (!(Number.isFinite(priceNum) && priceNum > 0)) {
+                return null;
+            }
+
+            const hi = Number(stock.regularMarketDayHigh);
+            const lo = Number(stock.regularMarketDayLow);
+
+            return {
+                price: priceNum,
+                change: computeBrapiChangePercent(stock, priceNum),
+                volume: Number(stock.regularMarketVolume) || 0,
+                high: Number.isFinite(hi) && hi > 0 ? hi : priceNum,
+                low: Number.isFinite(lo) && lo > 0 ? lo : priceNum,
+                name: stock.longName || stock.shortName || symbol,
+                currency: stock.currency || 'BRL',
+                source: 'brapi'
+            };
+        } catch (e) {
+            console.warn('Brapi', cleanSymbol, e);
+            return null;
         }
-        
+    };
+
+    try {
+        if (symbol.includes('.SA')) {
+            const cleanSymbol = symbol.replace(/\.SA/gi, '').toUpperCase();
+
+            // Mesmo fluxo Petrobras/B3 via Brapi; Yahoo após resolve CORS quando possível.
+            const brapiRow = await tryBrapiB3(cleanSymbol);
+            if (brapiRow) {
+                return brapiRow;
+            }
+
+            const yahoo = await fetchYahooFinanceChart(symbol);
+            if (yahoo && Number.isFinite(yahoo.price) && yahoo.price > 0) {
+                return { ...yahoo, source: 'yahoo' };
+            }
+
+            throw new Error('Sem cotação B3 (Brapi sem linha e Yahoo bloqueado ou indisponível)');
+        }
+
+        const yahooUs = await fetchYahooFinanceChart(symbol);
+        if (yahooUs && Number.isFinite(yahooUs.price) && yahooUs.price > 0) {
+            return { ...yahooUs, source: 'yahoo' };
+        }
+
         throw new Error('No valid data received');
     } catch (error) {
         console.error(`Error fetching stock data for ${symbol}:`, error);
-        
-        // Retorna dados simulados em caso de erro para não bloquear o fluxo
-        return {
-            price: Math.random() * 100 + 10,
-            change: (Math.random() - 0.5) * 10,
-            volume: Math.random() * 10000000,
-            high: Math.random() * 100 + 15,
-            low: Math.random() * 100 + 5,
-            name: symbol,
-            simulated: true
-        };
+        return null;
     }
 }
 
@@ -564,7 +785,8 @@ async function fetchCryptoData(symbol) {
                 high: data.market_data.high_24h.usd || data.market_data.current_price.usd,
                 low: data.market_data.low_24h.usd || data.market_data.current_price.usd,
                 marketCap: data.market_data.market_cap.usd || 0,
-                name: data.name
+                name: data.name,
+                currency: 'USD'
             };
         }
         
@@ -581,7 +803,8 @@ async function fetchCryptoData(symbol) {
             low: Math.random() * 50000 + 50,
             marketCap: Math.random() * 100000000000,
             name: symbol,
-            simulated: true
+            simulated: true,
+            currency: 'USD'
         };
     }
 }
@@ -592,16 +815,30 @@ async function analyzeWithGroq(assetData, assetInfo) {
         throw new Error('Please configure your Groq API key in scripts/script.js');
     }
 
+    const currency =
+        assetData.currency ||
+        (assetInfo.market === 'Brazil' ? 'BRL' : assetInfo.type === 'Crypto' ? 'USD' : 'USD');
+
+    const pct = Number(assetData.change);
+    const changeStr = Number.isFinite(pct) ? pct.toFixed(2) : '0.00';
+
+    const volumeLine =
+        assetInfo.type === 'Crypto'
+            ? `Volume 24h (USD, aprox.): ${formatIntlCurrency(assetData.volume, 'USD')}`
+            : `Volume na sessão (papéis, aprox.): ${compactNumberPt(assetData.volume)}`;
+
     const prompt = `Analyze the following financial asset and provide technical analysis:
 
 Asset: ${assetInfo.name} (${assetInfo.symbol})
 Type: ${assetInfo.type}
 Market: ${assetInfo.market}
-Current Price: $${assetData.price}
-24h Change: ${assetData.change.toFixed(2)}%
-Volume: $${assetData.volume}
-24h High: $${assetData.high}
-24h Low: $${assetData.low}
+Current price (${currency}): ${formatIntlCurrency(assetData.price, currency)}
+Variation vs baseline session (%): ${changeStr}%
+${volumeLine}
+High (${currency}): ${formatIntlCurrency(assetData.high, currency)}
+Low (${currency}): ${formatIntlCurrency(assetData.low, currency)}
+
+Important: Interpret all nominal values in ${currency}.
 
 Provide:
 1. Score (0-100) based on momentum, trend, and strength
@@ -642,13 +879,24 @@ Respond ONLY in JSON format:
         });
 
         if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.error?.message || 'Groq API error');
+            let msg = `${response.status} ${response.statusText}`;
+            try {
+                const errorData = await response.json();
+                msg = errorData.error?.message || msg;
+            } catch (_) {
+                try {
+                    msg = (await response.text()) || msg;
+                } catch (_) {}
+            }
+            throw new Error(msg);
         }
 
         const data = await response.json();
-        const content = data.choices[0].message.content;
-        
+        const content = data.choices?.[0]?.message?.content;
+        if (!content) {
+            throw new Error('Resposta Groq vazia (modelo/quota)');
+        }
+
         const jsonMatch = content.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
             return JSON.parse(jsonMatch[0]);
@@ -684,6 +932,7 @@ async function analyzeAssets() {
 
     let successCount = 0;
     let failCount = 0;
+    const failureHints = [];
 
     try {
         for (const asset of state.selectedAssets) {
@@ -702,10 +951,14 @@ async function analyzeAssets() {
                     successCount++;
                 } else {
                     failCount++;
+                    const tag = `${asset.symbol ?? asset.name}`;
+                    failureHints.push(`${tag}: sem cotação (Brapi/Yahoo)`);
                     console.error(`No data for ${asset.name}`);
                 }
             } catch (error) {
                 failCount++;
+                const tag = `${asset.symbol ?? asset.name}`;
+                failureHints.push(`${tag}: ${error.message}`);
                 console.error(`Error analyzing ${asset.name}:`, error);
                 showAlert(`Skipped ${asset.name}: ${error.message}`, 'error');
             }
@@ -717,7 +970,11 @@ async function analyzeAssets() {
         if (successCount > 0) {
             showAlert(`Analysis completed: ${successCount} successful, ${failCount} failed`, 'success');
         } else {
-            showAlert('All analyses failed. Please check your API configuration.', 'error');
+            const hint = failureHints.slice(0, 5).join(' — ');
+            showAlert(
+                `Todas as análises falharam. Verifique rede, Groq e (B3) token Brapi em CONFIG.${hint ? ' Detalhes: ' + hint : ''}`,
+                'error'
+            );
         }
     } catch (error) {
         showAlert(`Critical error: ${error.message}`, 'error');
@@ -731,18 +988,37 @@ function displayResult(assetInfo, marketData, aiAnalysis) {
     const container = document.getElementById('resultsContainer');
     const card = document.createElement('div');
     card.className = 'result-card';
-    
+
+    const currency =
+        marketData.currency ||
+        (assetInfo.market === 'Brazil' ? 'BRL' : assetInfo.type === 'Crypto' ? 'USD' : 'USD');
+
     const changeClass = marketData.change >= 0 ? 'positive' : 'negative';
     const changeSymbol = marketData.change >= 0 ? '+' : '';
-    
+
     let recommendationClass = 'hold';
     if (aiAnalysis.recommendation.includes('BUY')) recommendationClass = 'buy';
     if (aiAnalysis.recommendation.includes('SELL')) recommendationClass = 'sell';
-    
+
     // Adiciona badge se dados forem simulados
-    const simulatedBadge = marketData.simulated ? 
-        '<span style="background: rgba(245, 158, 11, 0.2); color: #f59e0b; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; margin-left: 8px;">DEMO DATA</span>' : '';
-    
+    const simulatedBadge = marketData.simulated
+        ? '<span style="background: rgba(245, 158, 11, 0.2); color: #f59e0b; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; margin-left: 8px;">DEMO DATA</span>'
+        : '';
+
+    const formattedPrice = formatIntlCurrency(marketData.price, currency);
+    const formattedHigh = formatIntlCurrency(marketData.high, currency);
+    const formattedLow = formatIntlCurrency(marketData.low, currency);
+
+    const volLabel =
+        assetInfo.type === 'Crypto' ? 'Volume 24h (USD)' : 'Session volume (shares)';
+    const volDisplay =
+        assetInfo.type === 'Crypto'
+            ? formatIntlCurrency(marketData.volume, 'USD')
+            : compactNumberPt(marketData.volume);
+
+    const highLabel = assetInfo.type === 'Crypto' ? '24h High' : 'High (session)';
+    const lowLabel = assetInfo.type === 'Crypto' ? '24h Low' : 'Low (session)';
+
     card.innerHTML = `
         <div class="result-header">
             <div class="result-info">
@@ -750,7 +1026,7 @@ function displayResult(assetInfo, marketData, aiAnalysis) {
                 <div class="result-meta">${assetInfo.ticker || assetInfo.symbol} • ${assetInfo.type}</div>
             </div>
             <div class="price-section">
-                <div class="current-price">${marketData.price.toFixed(2)}</div>
+                <div class="current-price">${formattedPrice}</div>
                 <div class="price-change ${changeClass}">${changeSymbol}${marketData.change.toFixed(2)}%</div>
             </div>
         </div>
@@ -767,16 +1043,16 @@ function displayResult(assetInfo, marketData, aiAnalysis) {
         
         <div class="metrics-grid">
             <div class="metric-card">
-                <div class="metric-label">Volume 24h</div>
-                <div class="metric-value">${(marketData.volume / 1000000).toFixed(2)}M</div>
+                <div class="metric-label">${volLabel}</div>
+                <div class="metric-value">${volDisplay}</div>
             </div>
             <div class="metric-card">
-                <div class="metric-label">24h High</div>
-                <div class="metric-value">${marketData.high.toFixed(2)}</div>
+                <div class="metric-label">${highLabel}</div>
+                <div class="metric-value">${formattedHigh}</div>
             </div>
             <div class="metric-card">
-                <div class="metric-label">24h Low</div>
-                <div class="metric-value">${marketData.low.toFixed(2)}</div>
+                <div class="metric-label">${lowLabel}</div>
+                <div class="metric-value">${formattedLow}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">Change</div>
@@ -793,6 +1069,6 @@ function displayResult(assetInfo, marketData, aiAnalysis) {
             </div>
         </div>
     `;
-    
+
     container.appendChild(card);
 }
